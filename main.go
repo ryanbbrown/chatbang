@@ -17,6 +17,7 @@ import (
 
 	"github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 
 	"github.com/BalanceBalls/nekot/clients"
@@ -268,7 +269,12 @@ func main() {
 		defer taskCancel()
 	}
 
-	// Navigate to ChatGPT, grant clipboard, and install per-tab interceptor
+	// Install clipboard interceptor BEFORE navigating so it runs before
+	// ChatGPT's JS can capture the original clipboard.writeText reference
+	if err := installClipboardInterceptor(taskCtx); err != nil {
+		log.Fatal("Failed to install clipboard interceptor:", err)
+	}
+
 	err = chromedp.Run(taskCtx,
 		chromedp.Navigate(`https://chatgpt.com`),
 		chromedp.WaitVisible(`#prompt-textarea`, chromedp.ByID),
@@ -278,9 +284,6 @@ func main() {
 	}
 	if err := grantClipboardPermission(taskCtx); err != nil {
 		log.Println("Warning: could not grant clipboard permission:", err)
-	}
-	if err := installClipboardInterceptor(taskCtx); err != nil {
-		log.Fatal("Failed to install clipboard interceptor:", err)
 	}
 
 	// Register the custom client that routes prompts through CDP
@@ -343,19 +346,22 @@ func grantClipboardPermission(ctx context.Context) error {
 	).WithOrigin(origin).Do(browserCtx)
 }
 
-/** installClipboardInterceptor overrides navigator.clipboard.writeText in this tab
-    so the copied markdown is captured in a per-tab JS global instead of the system clipboard. */
+/** installClipboardInterceptor registers a script that runs before any page JS,
+    overriding navigator.clipboard.writeText to capture copied text in a per-tab global. */
 func installClipboardInterceptor(ctx context.Context) error {
-	return chromedp.Run(ctx, chromedp.Evaluate(`
-		(() => {
+	return chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+		_, err := page.AddScriptToEvaluateOnNewDocument(`
 			window.__chatbangCaptured = null;
-			const orig = navigator.clipboard.writeText.bind(navigator.clipboard);
-			navigator.clipboard.writeText = function(text) {
-				window.__chatbangCaptured = text;
-				return orig(text);
-			};
-		})()
-	`, nil))
+			if (navigator.clipboard && navigator.clipboard.writeText) {
+				const orig = navigator.clipboard.writeText.bind(navigator.clipboard);
+				navigator.clipboard.writeText = function(text) {
+					window.__chatbangCaptured = text;
+					return orig(text);
+				};
+			}
+		`).Do(ctx)
+		return err
+	}))
 }
 
 /** sendAndWaitForResponse sends a prompt and waits for the response via the per-tab clipboard interceptor. */

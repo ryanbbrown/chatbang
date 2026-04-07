@@ -5,20 +5,45 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 )
 
-/** polyfillClipboard injects a fake navigator.clipboard for data: URLs where the API doesn't exist. */
-func polyfillClipboard(ctx context.Context) error {
-	return chromedp.Run(ctx, chromedp.Evaluate(`
-		if (!navigator.clipboard) {
-			navigator.clipboard = {
-				_text: "",
-				writeText: function(text) { this._text = text; return Promise.resolve(); },
-				readText: function() { return Promise.resolve(this._text); },
-			};
-		}
+/** polyfillAndIntercept installs both the clipboard polyfill (for data: URLs) and
+    the interceptor as pre-navigation scripts, then navigates. */
+func polyfillAndIntercept(ctx context.Context, url string) error {
+	// Polyfill clipboard API for data: URLs (not needed on real HTTPS pages)
+	err := chromedp.Run(ctx, chromedp.Evaluate(`
+		// This only runs on the current blank page; the AddScriptToEvaluateOnNewDocument
+		// below handles future navigations.
 	`, nil))
+	if err != nil {
+		return err
+	}
+
+	// Register polyfill FIRST (data: URLs lack clipboard API; real HTTPS pages already have it)
+	if err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+		_, err := page.AddScriptToEvaluateOnNewDocument(`
+			if (!navigator.clipboard) {
+				navigator.clipboard = {
+					_text: "",
+					writeText: function(text) { this._text = text; return Promise.resolve(); },
+					readText: function() { return Promise.resolve(this._text); },
+				};
+			}
+		`).Do(ctx)
+		return err
+	})); err != nil {
+		return err
+	}
+
+	// THEN install interceptor (clipboard now exists when this runs)
+	if err := installClipboardInterceptor(ctx); err != nil {
+		return err
+	}
+
+	// NOW navigate — both scripts will run before the page's own JS
+	return chromedp.Run(ctx, chromedp.Navigate(url))
 }
 
 /** TestClipboardInterceptor verifies the per-tab clipboard interceptor captures text
@@ -29,29 +54,14 @@ func TestClipboardInterceptor(t *testing.T) {
 	ctx, cancel = context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	// Navigate to a minimal page
-	err := chromedp.Run(ctx,
-		chromedp.Navigate(`data:text/html,<html><body><button id="btn">Copy</button></body></html>`),
-		chromedp.WaitVisible(`#btn`, chromedp.ByID),
-	)
-	if err != nil {
-		t.Fatal("navigate:", err)
-	}
-
-	// Polyfill clipboard API (not available on data: URLs)
-	if err := polyfillClipboard(ctx); err != nil {
-		t.Fatal("polyfill:", err)
-	}
-
-	// Install interceptor
-	err = installClipboardInterceptor(ctx)
-	if err != nil {
-		t.Fatal("install interceptor:", err)
+	testPage := `data:text/html,<html><body><button id="btn">Copy</button></body></html>`
+	if err := polyfillAndIntercept(ctx, testPage); err != nil {
+		t.Fatal("setup:", err)
 	}
 
 	// Verify initial state is null
 	var initial string
-	err = chromedp.Run(ctx,
+	err := chromedp.Run(ctx,
 		chromedp.Evaluate(`window.__chatbangCaptured || ""`, &initial),
 	)
 	if err != nil {
@@ -83,16 +93,12 @@ func TestClipboardInterceptor(t *testing.T) {
 	}
 
 	// Verify clearing works
-	err = chromedp.Run(ctx,
-		chromedp.Evaluate(`window.__chatbangCaptured = null`, nil),
-	)
+	err = chromedp.Run(ctx, chromedp.Evaluate(`window.__chatbangCaptured = null`, nil))
 	if err != nil {
 		t.Fatal("clear:", err)
 	}
 	var afterClear string
-	err = chromedp.Run(ctx,
-		chromedp.Evaluate(`window.__chatbangCaptured || ""`, &afterClear),
-	)
+	err = chromedp.Run(ctx, chromedp.Evaluate(`window.__chatbangCaptured || ""`, &afterClear))
 	if err != nil {
 		t.Fatal("read after clear:", err)
 	}
@@ -106,46 +112,28 @@ func TestTwoTabsIsolated(t *testing.T) {
 	allocCtx, allocCancel := chromedp.NewContext(context.Background())
 	defer allocCancel()
 
-	// Tab 1
 	ctx1, cancel1 := chromedp.NewContext(allocCtx)
 	defer cancel1()
 	ctx1, cancel1timeout := context.WithTimeout(ctx1, 15*time.Second)
 	defer cancel1timeout()
 
-	// Tab 2
 	ctx2, cancel2 := chromedp.NewContext(allocCtx)
 	defer cancel2()
 	ctx2, cancel2timeout := context.WithTimeout(ctx2, 15*time.Second)
 	defer cancel2timeout()
 
-	page := `data:text/html,<html><body>tab</body></html>`
+	testPage := `data:text/html,<html><body>tab</body></html>`
 
-	// Navigate both tabs
-	err := chromedp.Run(ctx1, chromedp.Navigate(page))
-	if err != nil {
-		t.Fatal("navigate tab1:", err)
+	// Setup interceptors THEN navigate (matching real chatbang flow)
+	if err := polyfillAndIntercept(ctx1, testPage); err != nil {
+		t.Fatal("setup tab1:", err)
 	}
-	err = chromedp.Run(ctx2, chromedp.Navigate(page))
-	if err != nil {
-		t.Fatal("navigate tab2:", err)
-	}
-
-	// Polyfill + install interceptors on both
-	if err := polyfillClipboard(ctx1); err != nil {
-		t.Fatal("polyfill tab1:", err)
-	}
-	if err := polyfillClipboard(ctx2); err != nil {
-		t.Fatal("polyfill tab2:", err)
-	}
-	if err := installClipboardInterceptor(ctx1); err != nil {
-		t.Fatal("install tab1:", err)
-	}
-	if err := installClipboardInterceptor(ctx2); err != nil {
-		t.Fatal("install tab2:", err)
+	if err := polyfillAndIntercept(ctx2, testPage); err != nil {
+		t.Fatal("setup tab2:", err)
 	}
 
 	// Write different text in each tab
-	err = chromedp.Run(ctx1,
+	err := chromedp.Run(ctx1,
 		chromedp.Evaluate(`navigator.clipboard.writeText("tab1 response")`, nil),
 		chromedp.Sleep(100*time.Millisecond),
 	)
