@@ -17,7 +17,6 @@ import (
 
 	"github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/cdproto/cdp"
-	cdpruntime "github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 
 	"github.com/BalanceBalls/nekot/clients"
@@ -269,7 +268,7 @@ func main() {
 		defer taskCancel()
 	}
 
-	// Navigate to ChatGPT and grant clipboard BEFORE starting TUI
+	// Navigate to ChatGPT, grant clipboard, and install per-tab interceptor
 	err = chromedp.Run(taskCtx,
 		chromedp.Navigate(`https://chatgpt.com`),
 		chromedp.WaitVisible(`#prompt-textarea`, chromedp.ByID),
@@ -279,6 +278,9 @@ func main() {
 	}
 	if err := grantClipboardPermission(taskCtx); err != nil {
 		log.Println("Warning: could not grant clipboard permission:", err)
+	}
+	if err := installClipboardInterceptor(taskCtx); err != nil {
+		log.Fatal("Failed to install clipboard interceptor:", err)
 	}
 
 	// Register the custom client that routes prompts through CDP
@@ -341,13 +343,35 @@ func grantClipboardPermission(ctx context.Context) error {
 	).WithOrigin(origin).Do(browserCtx)
 }
 
-/** sendAndWaitForResponse sends a prompt and waits for the response via clipboard copy. */
+/** installClipboardInterceptor overrides navigator.clipboard.writeText in this tab
+    so the copied markdown is captured in a per-tab JS global instead of the system clipboard. */
+func installClipboardInterceptor(ctx context.Context) error {
+	return chromedp.Run(ctx, chromedp.Evaluate(`
+		(() => {
+			window.__chatbangCaptured = null;
+			const orig = navigator.clipboard.writeText.bind(navigator.clipboard);
+			navigator.clipboard.writeText = function(text) {
+				window.__chatbangCaptured = text;
+				return orig(text);
+			};
+		})()
+	`, nil))
+}
+
+/** sendAndWaitForResponse sends a prompt and waits for the response via the per-tab clipboard interceptor. */
 func sendAndWaitForResponse(taskCtx context.Context, prompt string) (string, error) {
 	buttonDiv := `button[data-testid="copy-turn-action-button"]`
-	clipboardJS := `new Promise((resolve, reject) => { navigator.clipboard.readText().then(text => resolve(text)).catch(err => reject(err)); });`
+
+	// Clear any previously captured text
+	err := chromedp.Run(taskCtx,
+		chromedp.Evaluate(`window.__chatbangCaptured = null`, nil),
+	)
+	if err != nil {
+		return "", err
+	}
 
 	// Send the prompt
-	err := chromedp.Run(taskCtx,
+	err = chromedp.Run(taskCtx,
 		chromedp.WaitVisible(`#prompt-textarea`, chromedp.ByID),
 		chromedp.Click(`#prompt-textarea`, chromedp.ByID),
 		chromedp.SendKeys(`#prompt-textarea`, prompt, chromedp.ByID),
@@ -357,8 +381,7 @@ func sendAndWaitForResponse(taskCtx context.Context, prompt string) (string, err
 		return "", err
 	}
 
-	// Wait for the copy button to appear (response is complete)
-	// then click the last copy button and read clipboard
+	// Wait for copy button, click it, then read from the per-tab interceptor
 	for {
 		var copiedText string
 		err = chromedp.Run(taskCtx,
@@ -373,15 +396,12 @@ func sendAndWaitForResponse(taskCtx context.Context, prompt string) (string, err
 				})()
 			`, buttonDiv), nil),
 			chromedp.Sleep(200*time.Millisecond),
-			chromedp.Evaluate(clipboardJS, &copiedText, func(p *cdpruntime.EvaluateParams) *cdpruntime.EvaluateParams {
-				return p.WithAwaitPromise(true)
-			}),
+			chromedp.Evaluate(`window.__chatbangCaptured || ""`, &copiedText),
 		)
 		if err != nil {
 			return "", err
 		}
 
-		// Make sure we didn't just copy the user's prompt back
 		if len(copiedText) > 0 && copiedText != prompt {
 			return copiedText, nil
 		}
