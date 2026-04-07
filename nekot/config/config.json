@@ -1,0 +1,10 @@
+{
+  "providerBaseUrl": "http://localhost:19222",
+  "systemMessage": "",
+  "defaultModel": "chatgpt",
+  "colorScheme": "groove",
+  "provider": "openai",
+	"maxAttachmentSizeMb": 10,
+	"includeReasoningTokensInContext": true,
+	"sessionExportDir": ""
+}

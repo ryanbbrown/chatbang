@@ -1,0 +1,56 @@
+version: 2
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    binary: rc-nekot
+    goos:
+      - windows
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm
+      - arm64
+      - '386'
+    ignore:
+      - goos: windows
+        goarch: arm
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - format_overrides:
+    - goos: windows
+      formats: ['zip']
+
+checksum:
+  name_template: "checksums.txt"
+snapshot:
+  version_template: "{{ .Tag }}"
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+homebrew_casks:
+  - name: rc-nekot
+    binary: rc-nekot
+    repository:
+      owner: BalanceBalls
+      name: homebrew-BalanceBalls
+    homepage: https://github.com/BalanceBalls/nekot
+    directory: Casks
+    conflicts:
+      - formula: rc-nekot
+    commit_author:
+      name: BalanceBalls
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-d", "com.apple.quarantine", "#{staged_path}/rc-nekot"]
+          end
+    skip_upload: false

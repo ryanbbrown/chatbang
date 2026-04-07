@@ -1,0 +1,44 @@
+{
+  "projectName": "chatgpt-tui",
+  "projectOwner": "tearingItUp786",
+  "files": [
+    "README.md"
+  ],
+  "commitType": "docs",
+  "commitConvention": "angular",
+  "contributorsPerLine": 7,
+  "contributors": [
+    {
+      "login": "tearingItUp786",
+      "name": "Taranveer (Taran) Bains",
+      "avatar_url": "https://avatars.githubusercontent.com/u/16584942?v=4",
+      "profile": "https://twitter.com/tearingitup786",
+      "contributions": [
+        "doc",
+        "maintenance",
+        "review",
+        "code"
+      ]
+    },
+    {
+      "login": "sixlive",
+      "name": "TJ Miller",
+      "avatar_url": "https://avatars.githubusercontent.com/u/5108034?v=4",
+      "profile": "https://www.tjmiller.me",
+      "contributions": [
+        "doc",
+        "code"
+      ]
+    },
+    {
+      "login": "BalanceBalls",
+      "name": "BalanceBalls",
+      "avatar_url": "https://avatars.githubusercontent.com/u/29193297?v=4",
+      "profile": "https://github.com/BalanceBalls",
+      "contributions": [
+        "doc",
+        "code"
+      ]
+    }
+  ]
+}

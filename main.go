@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	goruntime "runtime"
 	"strings"
 	"time"
@@ -19,7 +20,13 @@ import (
 	cdpruntime "github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 
-	markdown "github.com/MichaelMure/go-term-markdown"
+	"github.com/BalanceBalls/nekot/clients"
+	"github.com/BalanceBalls/nekot/config"
+	"github.com/BalanceBalls/nekot/migrations"
+	"github.com/BalanceBalls/nekot/util"
+	"github.com/BalanceBalls/nekot/views"
+	tea "github.com/charmbracelet/bubbletea"
+	zone "github.com/lrstanley/bubblezone"
 )
 
 const ctxTime = 2000
@@ -216,14 +223,12 @@ func main() {
 		}
 
 		if os.Args[1] == "--help" || os.Args[1] == "-h" {
-			helpStr := "`Chatbang` is a simple tool to access ChatGPT from the terminal, without needing for an API key.  \n"
-
-			helpStr += "## Configuration  \n `Chatbang` requires a Chromium-based browser (e.g. Chrome, Edge, Brave) to work, so you need to have one. And then make sure that it points to the right path to your chosen browser in the default config path for `Chatbang`: `$HOME/.config/chatbang/chatbang`.  \n\nIt's default is: ``` browser=/usr/bin/google-chrome ```  \nChange it to your favorite Chromium-based browser.  \n\n"
-
-			helpStr += "You also need to log in to ChatGPT in `Chatbang`'s Chromium session, so you need to do: ```bash chatbang --config ``` That will open `Chatbang`'s Chromium session on ChatGPT's website, log in with your account. Then, you will need to allow the clipboard permission for ChatGPT's website (on the same session).  \n\n"
-
-			res := markdown.Render(string(helpStr), 80, 2)
-			fmt.Println(string(res))
+			fmt.Println("Chatbang - Access ChatGPT from the terminal without an API key")
+			fmt.Println()
+			fmt.Println("Usage:")
+			fmt.Println("  chatbang          Start chatting (Chrome must be running from --config)")
+			fmt.Println("  chatbang --config  One-time login setup (opens Chrome, log in to ChatGPT)")
+			fmt.Println("  chatbang --help    Show this help")
 			return
 		}
 	}
@@ -264,7 +269,7 @@ func main() {
 		defer taskCancel()
 	}
 
-	// Navigate to ChatGPT and grant clipboard BEFORE accepting input
+	// Navigate to ChatGPT and grant clipboard BEFORE starting TUI
 	err = chromedp.Run(taskCtx,
 		chromedp.Navigate(`https://chatgpt.com`),
 		chromedp.WaitVisible(`#prompt-textarea`, chromedp.ByID),
@@ -276,17 +281,44 @@ func main() {
 		log.Println("Warning: could not grant clipboard permission:", err)
 	}
 
-	fmt.Print("> ")
-	promptScanner := bufio.NewScanner(os.Stdin)
+	// Register the custom client that routes prompts through CDP
+	clients.RegisterCustomClient(&ChatbangClient{cdpCtx: taskCtx})
 
-	for promptScanner.Scan() {
-		firstPrompt := promptScanner.Text()
-		if len(firstPrompt) > 0 {
-			runChatGPT(taskCtx, firstPrompt)
-			return
-		}
+	// Initialize nekot TUI
+	flags := config.StartupFlags{
+		Model:           "chatgpt",
+		StartNewSession: true,
+	}
+	nekotConfig := config.CreateAndValidateConfig(flags)
 
-		fmt.Print("> ")
+	appPath, _ := util.GetAppDataPath()
+	f, err := tea.LogToFile(filepath.Join(appPath, "debug.log"), "debug")
+	if err != nil {
+		log.Fatal("fatal:", err)
+	}
+	defer f.Close()
+
+	db := util.InitDb()
+	err = util.MigrateFS(db, migrations.FS, ".")
+	if err != nil {
+		log.Fatal("Migration error:", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	ctxWithConfig := config.WithConfig(ctx, &nekotConfig)
+	appCtx := config.WithFlags(ctxWithConfig, &flags)
+	zone.NewGlobal()
+
+	p := tea.NewProgram(
+		views.NewMainView(db, appCtx),
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
+	)
+
+	_, err = p.Run()
+	if err != nil {
+		log.Fatal(err)
 	}
 }
 
@@ -353,40 +385,6 @@ func sendAndWaitForResponse(taskCtx context.Context, prompt string) (string, err
 		if len(copiedText) > 0 && copiedText != prompt {
 			return copiedText, nil
 		}
-	}
-}
-
-func runChatGPT(taskCtx context.Context, firstPrompt string) {
-	fmt.Printf("[Thinking...]\n\n")
-
-	text, err := sendAndWaitForResponse(taskCtx, firstPrompt)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	result := markdown.Render(text, 80, 2)
-	fmt.Println(string(result))
-
-	fmt.Print("> ")
-	promptScanner := bufio.NewScanner(os.Stdin)
-	for promptScanner.Scan() {
-		prompt := promptScanner.Text()
-		if len(prompt) == 0 {
-			fmt.Print("> ")
-			continue
-		}
-
-		fmt.Printf("[Thinking...]\n\n")
-
-		text, err := sendAndWaitForResponse(taskCtx, prompt)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		result := markdown.Render(text, 80, 2)
-		fmt.Println(string(result))
-
-		fmt.Print("> ")
 	}
 }
 
